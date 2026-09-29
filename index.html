@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>DAAS Site Map - Waterford Manor Properties</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; background: #0c0c0c; }
+  </style>
+
+</head>
+
+<body>
+
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+
+  <script>
+  
+  var map = L.map('map', {
+  minZoom: 16,
+  maxZoom: 25,   // ← whatever your highest generated z folder actually is
+   attributionControl: false,
+}).setView([52.262137, -7.118500], 20);
+
+L.tileLayer('{z}/{x}/{y}.png', {
+  minZoom: 16,
+  maxZoom: 25,
+  tms: false,
+  attribution: 'DAAS - DroneAsAService.com'
+}).addTo(map);
+
+  </script>
+
+
+</body>
+</html>
