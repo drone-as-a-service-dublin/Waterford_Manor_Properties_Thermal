@@ -1,43 +1,180 @@
 <!DOCTYPE html>
 <html>
-
 <head>
   <meta charset="utf-8" />
   <title>DAAS Site Map - Waterford Manor Properties</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  
   <style>
     html, body, #map { height: 100%; margin: 0; padding: 0; background: #0c0c0c; }
+    #panel {
+      position: absolute; top: 10px; right: 10px; z-index: 1000;
+      background: rgba(20,20,20,.9); color: #eee; padding: 12px 14px;
+      border-radius: 6px; font: 13px/1.4 system-ui, sans-serif; width: 220px;
+    }
+    #panel label { display: flex; justify-content: space-between; margin-top: 6px; }
+    #panel input[type=range] { width: 100%; }
+    #legend { height: 12px; border-radius: 3px; margin-top: 10px; }
+    #legendVals { display: flex; justify-content: space-between; font-size: 12px; }
+    #panel button { margin-top: 8px; width: 100%; cursor: pointer; }
+    #warn { display: none; margin-top: 8px; font-size: 12px; color: #ffb454; }
   </style>
-
 </head>
-
 <body>
-
   <div id="map"></div>
 
+  <div id="panel">
+    <strong>Temperature range</strong>
+    <label>Min <span id="loVal"></span></label>
+    <input type="range" id="lo" step="0.1">
+    <label>Max <span id="hiVal"></span></label>
+    <input type="range" id="hi" step="0.1">
+    <div id="legend"></div>
+    <div id="legendVals"><span id="lgLo"></span><span id="lgHi"></span></div>
+    <button id="reset">Reset range</button>
+    <div style="margin-top:8px;font-size:12px;opacity:.7">Click the map to read a temperature.</div>
+    <div id="warn">Temperature reading is blocked. Open this page with Live Server or from your web host, not by double-clicking the file.</div>
+  </div>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-
   <script>
-  
+  // ===== SETTINGS =====
+  const T_MIN = 5.0;       // °C of darkest colour in your export
+  const T_MAX = 35.0;      // °C of brightest colour in your export
+  const NATIVE_MAX = 25;   // highest z folder you generated
+
+  const STOPS = [
+    [0.0,[0,0,4]],[0.1,[22,11,57]],[0.2,[66,10,104]],[0.3,[106,23,110]],
+    [0.4,[147,38,103]],[0.5,[188,55,84]],[0.6,[221,81,58]],[0.7,[243,120,25]],
+    [0.8,[252,165,10]],[0.9,[246,215,70]],[1.0,[252,255,164]]
+  ];
+
+  // ===== YOUR ORIGINAL MAP (unchanged) =====
   var map = L.map('map', {
-  minZoom: 16,
-  maxZoom: 25,   // ← whatever your highest generated z folder actually is
-   attributionControl: false,
-}).setView([52.262137, -7.118500], 20);
+    minZoom: 16,
+    maxZoom: 25,
+    attributionControl: false,
+  }).setView([52.262137, -7.118500], 20);
 
-L.tileLayer('{z}/{x}/{y}.png', {
-  minZoom: 16,
-  maxZoom: 25,
-  tms: false,
-  attribution: 'DAAS - DroneAsAService.com'
-}).addTo(map);
+  L.tileLayer('{z}/{x}/{y}.png', {
+    minZoom: 16,
+    maxZoom: 25,
+    tms: false,
+    attribution: 'DAAS - DroneAsAService.com'
+  }).addTo(map);
 
+  // ===== PALETTE =====
+  const PAL = [];
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255; let j = 0;
+    while (j < STOPS.length - 2 && t > STOPS[j + 1][0]) j++;
+    const [t0, c0] = STOPS[j], [t1, c1] = STOPS[j + 1], f = (t - t0) / (t1 - t0);
+    PAL.push(c0.map((v, k) => Math.round(v + (c1[k] - v) * f)));
+  }
+  const lut = new Map();
+  function rgbToNorm(r, g, b) {
+    const key = (r << 16) | (g << 8) | b;
+    let v = lut.get(key); if (v !== undefined) return v;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < 256; i++) {
+      const c = PAL[i], d = (c[0]-r)**2 + (c[1]-g)**2 + (c[2]-b)**2;
+      if (d < bd) { bd = d; best = i; }
+    }
+    v = best / 255; lut.set(key, v); return v;
+  }
+
+  // ===== THERMAL OVERLAY (on top, fails safely) =====
+  let lo = T_MIN, hi = T_MAX, blocked = false;
+  const cache = {};
+  const $ = id => document.getElementById(id);
+
+  function paint(key) {
+    const { temps, canvas } = cache[key];
+    const ctx = canvas.getContext('2d'), img = ctx.createImageData(256, 256), d = img.data;
+    const span = hi - lo || 0.001;
+    for (let i = 0; i < temps.length; i++) {
+      const t = temps[i];
+      if (isNaN(t)) { d[i*4+3] = 0; continue; }
+      const n = Math.min(1, Math.max(0, (t - lo) / span));
+      const c = PAL[Math.round(n * 255)];
+      d[i*4] = c[0]; d[i*4+1] = c[1]; d[i*4+2] = c[2]; d[i*4+3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  const ThermalLayer = L.GridLayer.extend({
+    createTile(coords, done) {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 256;
+      if (blocked) { setTimeout(() => done(null, canvas)); return canvas; }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const tmp = document.createElement('canvas');
+          tmp.width = tmp.height = 256;
+          const tctx = tmp.getContext('2d');
+          tctx.drawImage(img, 0, 0);
+          const d = tctx.getImageData(0, 0, 256, 256).data;   // throws on file://
+          const temps = new Float32Array(65536);
+          for (let i = 0; i < 65536; i++) {
+            temps[i] = d[i*4+3] < 10 ? NaN
+              : T_MIN + rgbToNorm(d[i*4], d[i*4+1], d[i*4+2]) * (T_MAX - T_MIN);
+          }
+          const key = `${coords.z}/${coords.x}/${coords.y}`;
+          cache[key] = { temps, canvas };
+          paint(key);
+        } catch (err) {
+          blocked = true;
+          $('warn').style.display = 'block';
+        }
+        done(null, canvas);   // blank canvas if blocked → your original map shows through
+      };
+      img.onerror = () => done(null, canvas);
+      img.src = `${coords.z}/${coords.x}/${coords.y}.png`;
+      return canvas;
+    }
+  });
+
+  const thermal = new ThermalLayer({
+    minZoom: 16, maxZoom: 25, maxNativeZoom: NATIVE_MAX
+  }).addTo(map);
+  thermal.on('tileunload', e => delete cache[`${e.coords.z}/${e.coords.x}/${e.coords.y}`]);
+
+  // ===== CLICK = TEMPERATURE =====
+  map.on('click', e => {
+    if (blocked) {
+      L.popup().setLatLng(e.latlng).setContent('Open the page via Live Server or your web host to read temperatures.').openOn(map);
+      return;
+    }
+    const z = Math.min(Math.round(map.getZoom()), NATIVE_MAX);
+    const p = map.project(e.latlng, z).floor();
+    const x = Math.floor(p.x / 256), y = Math.floor(p.y / 256);
+    const c = cache[`${z}/${x}/${y}`];
+    if (!c) return;
+    const t = c.temps[(p.y - y*256) * 256 + (p.x - x*256)];
+    if (isNaN(t)) return;
+    L.popup().setLatLng(e.latlng).setContent(`<b>${t.toFixed(1)} °C</b>`).openOn(map);
+  });
+
+  // ===== RANGE CONTROL =====
+  [$('lo'), $('hi')].forEach(s => { s.min = T_MIN; s.max = T_MAX; });
+  $('lo').value = lo; $('hi').value = hi;
+  $('legend').style.background =
+    `linear-gradient(to right, ${STOPS.map(([s,c]) => `rgb(${c}) ${s*100}%`).join(',')})`;
+
+  let raf;
+  function update() {
+    lo = +$('lo').value; hi = +$('hi').value;
+    if (lo >= hi) { hi = lo + 0.1; $('hi').value = hi; }
+    $('loVal').textContent = $('lgLo').textContent = lo.toFixed(1) + ' °C';
+    $('hiVal').textContent = $('lgHi').textContent = hi.toFixed(1) + ' °C';
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => Object.keys(cache).forEach(paint));
+  }
+  $('lo').oninput = $('hi').oninput = update;
+  $('reset').onclick = () => { $('lo').value = T_MIN; $('hi').value = T_MAX; update(); };
+  L.DomEvent.disableClickPropagation($('panel'));
+  update();
   </script>
-
-
 </body>
 </html>
